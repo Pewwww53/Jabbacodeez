@@ -1,16 +1,3 @@
-import { StatusBar } from "expo-status-bar";
-import {
-  StyleSheet,
-  Text,
-  View,
-  Image,
-  FlatList,
-  TouchableOpacity,
-  Alert,
-} from "react-native";
-import { getAsset } from "./assets_returns";
-import MapView, { Marker, Polyline } from "react-native-maps";
-import * as Location from "expo-location";
 import React, {
   useEffect,
   useState,
@@ -18,19 +5,40 @@ import React, {
   useCallback,
   useRef,
 } from "react";
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Polyline,
+  Popup,
+  useMap,
+} from "react-leaflet";
 import evacuation_centers from "./evacuation_centers";
 import { getDistanceFromLatLonInKm } from "./utils/distance";
 import { clearWaypointCache, getCachedData } from "./utils/cache";
 import NavigationSteps from "./components/NavigationSteps";
 import SearchBar from "./components/SearchBar";
 import { getBearing } from "./utils/bearing";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { locationCache } from "./utils/locationCache";
 import AddLocationModal from "./components/AddLocationModal";
 import { auth } from "./firebase";
 import { saveLocation as saveLocationToFirebase } from "./services/locations";
+import L from "leaflet";
+const DEFAULT_POSITION = [14.5995, 120.9842];
 
-export default function Map() {
+const iconPerson = new L.Icon({
+  iconUrl: "/person-icon-blue-13.png", // Place your icon in public folder
+  iconSize: [16, 32], // Adjust size as needed
+  iconAnchor: [16, 32], // Point of the icon which will correspond to marker's location
+  popupAnchor: [0, -32], // Point from which the popup should open relative to the iconAnchor
+});
+const pointIcon = new L.Icon({
+  iconUrl: "/flag.png", // Place your icon in public folder
+  iconSize: [16, 32], // Adjust size as needed
+  iconAnchor: [16, 32], // Point of the icon which will correspond to marker's location
+  popupAnchor: [0, -32], // Point from which the popup should open relative to the iconAnchor
+});
+export default function Map({ isMobile }) {
   const [location, setLocation] = useState(null);
   const [search, setSearch] = useState("");
   const [searchResult, setSearchResult] = useState(null);
@@ -47,13 +55,12 @@ export default function Map() {
   const [navigationRegion, setNavigationRegion] = useState(null);
   const [isAddLocationVisible, setIsAddLocationVisible] = useState(false);
 
-  const mapRef = useRef(null);
   const debounceTimeout = useRef();
 
+  // Fetch suggestions from Geoapify
   const fetchSuggestions = useCallback((query) => {
     clearTimeout(debounceTimeout.current);
     if (!query.trim()) return setSuggestions([]);
-
     debounceTimeout.current = setTimeout(async () => {
       try {
         const res = await fetch(
@@ -73,24 +80,17 @@ export default function Map() {
     }, 350);
   }, []);
 
+  // Get user's location
   useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== "granted") return;
-
-        const loc = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Highest,
-        });
-        if (active) setLocation(loc.coords);
-      } catch {
-        if (active) setLocation(null);
-      }
-    })();
-    return () => {
-      active = false;
-    };
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) =>
+        setLocation({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+        }),
+      () => setLocation(null)
+    );
   }, []);
 
   const handleSelectSuggestion = (item) => {
@@ -111,23 +111,15 @@ export default function Map() {
     locationCache.saveLocation(locationData);
 
     setPreviewResult(locationData);
-    Alert.alert("Go to Location", `Do you want to go to:\n${formatted}?`, [
-      {
-        text: "Cancel",
-        style: "cancel",
-        onPress: () => setPreviewResult(null),
-      },
-      {
-        text: "Yes",
-        onPress: () => {
-          setSearch(formatted);
-          setSearchResult(locationData);
-          setPreviewResult(null);
-          setSuggestions([]);
-          setSearchFocused(false);
-        },
-      },
-    ]);
+    if (window.confirm(`Go to Location:\n${formatted}?`)) {
+      setSearch(formatted);
+      setSearchResult(locationData);
+      setPreviewResult(null);
+      setSuggestions([]);
+      setSearchFocused(false);
+    } else {
+      setPreviewResult(null);
+    }
   };
 
   const loadCachedLocations = async () => {
@@ -136,27 +128,14 @@ export default function Map() {
   };
 
   const region = useMemo(() => {
-    if (navigating && navigationRegion) return navigationRegion;
     const target = previewResult || searchResult || location;
-    if (target)
-      return {
-        latitude: target.latitude,
-        longitude: target.longitude,
-        latitudeDelta: 0.025,
-        longitudeDelta: 0.025,
-      };
-    return {
-      latitude: 14.5995,
-      longitude: 120.9842,
-      latitudeDelta: 0.25,
-      longitudeDelta: 0.25,
-    };
-  }, [previewResult, searchResult, location, navigating, navigationRegion]);
+    if (target) return [target.latitude, target.longitude];
+    return DEFAULT_POSITION;
+  }, [previewResult, searchResult, location]);
 
   useEffect(() => {
     if (!searchResult || !location) return;
 
-    // clearWaypointCache();
     setIsLoading(true);
     setWaypointData(null);
 
@@ -175,9 +154,12 @@ export default function Map() {
           { signal: controller.signal }
         );
         const data = await res.json();
+        console.log(data.result);
+        
         setWaypointData(data.result);
         setSelectedRoute(data.result.best_route_index ?? 0);
-        await AsyncStorage.setItem(cacheKey, JSON.stringify(data));
+        // You may want to use localStorage for web
+        localStorage.setItem(cacheKey, JSON.stringify(data));
       } catch {
         setWaypointData(null);
       } finally {
@@ -186,7 +168,7 @@ export default function Map() {
     })();
 
     return () => controller.abort();
-  }, [searchResult]);
+  }, [searchResult, location]);
 
   const nearestEvacCenters = useMemo(() => {
     if (!location) return [];
@@ -214,79 +196,6 @@ export default function Map() {
     setSearchResult(null);
     setPreviewResult(null);
   };
-  useEffect(() => {
-    if (!navigating) return;
-
-    let headingSub, locationSub;
-    (async () => {
-      headingSub = await Location.watchHeadingAsync((h) => {
-        if (
-          waypointData?.routes?.[selectedRoute]?.coordinates?.length >
-            currentStep + 1 &&
-          location
-        ) {
-          const nextPoint =
-            waypointData.routes[selectedRoute].coordinates[currentStep + 1];
-          const roadBearing = getBearing(
-            location.latitude,
-            location.longitude,
-            nextPoint[0],
-            nextPoint[1]
-          );
-          const deviceHeading = h.trueHeading || h.magHeading || 0;
-          const diff = Math.abs(roadBearing - deviceHeading);
-          if (diff < 30 || diff > 330) setHeading(deviceHeading);
-        }
-      });
-
-      locationSub = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.Highest,
-          timeInterval: 1000,
-          distanceInterval: 1,
-        },
-        (loc) => setLocation(loc.coords)
-      );
-    })();
-
-    return () => {
-      headingSub?.remove();
-      locationSub?.remove();
-    };
-  }, [navigating]);
-
-  useEffect(() => {
-    if (!navigating || !location) return;
-
-    const route = waypointData?.routes?.[selectedRoute];
-    if (!route) return;
-
-    const stepCoord =
-      route.instructions?.[currentStep]?.point ||
-      route.coordinates?.[currentStep];
-    if (!stepCoord) return;
-
-    const targetLat = stepCoord[0] ?? stepCoord.latitude;
-    const targetLon = stepCoord[1] ?? stepCoord.longitude;
-
-    const navRegion = {
-      latitude: targetLat,
-      longitude: targetLon,
-      latitudeDelta: 0.002,
-      longitudeDelta: 0.002,
-    };
-    setNavigationRegion(navRegion);
-
-    mapRef.current?.animateCamera(
-      {
-        center: { latitude: targetLat, longitude: targetLon },
-        heading,
-        pitch: 60,
-        zoom: 19,
-      },
-      { duration: 600 }
-    );
-  }, [navigating, currentStep, location, heading, waypointData, selectedRoute]);
 
   const handleAddLocation = async (locationData) => {
     try {
@@ -301,175 +210,273 @@ export default function Map() {
         }
       }
 
-      Alert.alert("Success", "Location added successfully");
+      window.alert("Location added successfully");
     } catch (err) {
       console.warn("save location error", err);
-      Alert.alert("Error", "Failed to add location");
+      window.alert("Failed to add location");
     }
   };
 
+  // Polyline coordinates for leaflet
+  const getPolylineCoords = () => {
+    if (!waypointData?.routes?.[selectedRoute]?.coordinates) return [];
+    return waypointData.routes[selectedRoute].coordinates.map((coord) => [
+      coord[0],
+      coord[1],
+    ]);
+  };
+
+  // Flood level colors
+  const getPolylineColors = () => {
+    const levels = waypointData?.routes?.[selectedRoute]?.flood_levels || [];
+    return levels.map((floodLevel) =>
+      floodLevel === 1
+        ? "#ffff00"
+        : floodLevel === 2
+        ? "#ffa500"
+        : floodLevel === 3
+        ? "#ff0000"
+        : "blue"
+    );
+  };
+
   return (
-    <View style={styles.container}>
-      {searchFocused && (
-        <View style={styles.fullScreenSearch}>
-          <SearchBar
-            search={search}
-            setSearch={setSearch}
-            fetchSuggestions={fetchSuggestions}
-            setSearchFocused={setSearchFocused}
-            searchFocused={searchFocused}
-            nearestEvacCenters={nearestEvacCenters}
-            handleSelectSuggestion={handleSelectSuggestion}
-            suggestions={suggestions}
-            location={location}
-            setSuggestions={setSuggestions}
-          />
-        </View>
-      )}
-
-      <View style={{ flex: 1 }}>
-        <View style={styles.header}>
-          <Image source={getAsset("logo.png")} style={styles.logo} />
-          <View style={{ flex: 1 }}>
-            <SearchBar
-              search={search}
-              setSearch={setSearch}
-              fetchSuggestions={fetchSuggestions}
-              setSearchFocused={setSearchFocused}
-              searchFocused={searchFocused}
-              nearestEvacCenters={nearestEvacCenters}
-              handleSelectSuggestion={handleSelectSuggestion}
-              suggestions={suggestions}
-              location={location}
-              setSuggestions={setSuggestions}
-              getCachedLocations={loadCachedLocations}
-            />
-          </View>
-          <Text style={styles.headerTitle}>Maps</Text>
-        </View>
-
-        <MapView
-          mapType="terrain"
-          ref={mapRef}
-          style={styles.map}
-          region={region}
-          showsUserLocation
-          showsCompass
-          pitchEnabled
-          rotateEnabled
-          zoomEnabled
-          scrollEnabled
-          minZoomLevel={11}
-          maxZoomLevel={21}
-          loadingEnabled={true}
-          loadingIndicatorColor="#00C8F8"
-          loadingBackgroundColor="#ffffff"
+    <div
+      style={{
+        display: "flex",
+        flexDirection: isMobile ? "column" : "row",
+        width: "100%",
+        height: "100%",
+        boxSizing: "border-box",
+        flex: 1,
+      }}
+    >
+      {/* Map Section */}
+      <div
+        style={{
+          flex: 2,
+          minWidth: isMobile ? "100%" : 0,
+          height: isMobile ? "400px" : "100%",
+          maxHeight: "100%",
+          background: "#F7F7F7",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <MapContainer
+          center={region}
+          zoom={13}
+          style={{
+            width: isMobile ? "100%" : "100%",
+            height: isMobile ? "400px" : "100%",
+            minHeight: "400px",
+            maxWidth: "100%",
+            margin: "0 auto",
+          }}
         >
+          <TileLayer
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution="&copy; OpenStreetMap contributors"
+          />
           {location && (
             <Marker
-              coordinate={location}
-              title="You are here"
-              pinColor="blue"
-            />
+              position={[location.latitude, location.longitude]}
+              icon={iconPerson}
+            >
+              <Popup>You are here</Popup>
+            </Marker>
           )}
           {(searchResult || previewResult) && (
             <Marker
-              coordinate={previewResult || searchResult}
-              title={previewResult ? "Preview" : "Destination"}
-              pinColor={previewResult ? "orange" : "red"}
+              position={[
+                (previewResult || searchResult).latitude,
+                (previewResult || searchResult).longitude,
+              ]}
+              icon={pointIcon}
+            >
+              <Popup>{previewResult ? "Preview" : "Destination"}</Popup>
+            </Marker>
+          )}
+          {/* Polyline for route */}
+          {waypointData?.routes?.[selectedRoute]?.coordinates && (
+            <Polyline
+              positions={getPolylineCoords()}
+              pathOptions={{
+                color: getPolylineColors()[0] || "blue",
+                weight: 4,
+                opacity: 0.7,
+              }}
             />
           )}
-
-          {waypointData?.routes?.[selectedRoute]?.coordinates
-            ?.slice(0, -1)
-            .map((coord, i) => {
-              const next =
-                waypointData.routes[selectedRoute].coordinates[i + 1];
-              if (!next) return null;
-              const floodLevel =
-                waypointData.routes[selectedRoute].flood_levels?.[i];
-              const color =
-                floodLevel === 1
-                  ? "#ffff00"
-                  : floodLevel === 2
-                  ? "#ffa500"
-                  : floodLevel === 3
-                  ? "#ff0000"
-                  : "blue";
-              return (
-                <Polyline
-                  key={i}
-                  coordinates={[
-                    { latitude: coord[0], longitude: coord[1] },
-                    { latitude: next[0], longitude: next[1] },
-                  ]}
-                  strokeColor={color}
-                  strokeWidth={4}
-                  opacity={0.7}
-                />
-              );
-            })}
-        </MapView>
-
+        </MapContainer>
+      </div>
+      {/* Sidebar/Controls Section */}
+      <div
+        style={{
+          flex: 1,
+          minWidth: isMobile ? "100%" : "350px",
+          maxWidth: isMobile ? "100%" : "400px",
+          height: isMobile ? "auto" : "100%",
+          background: "#fff",
+          padding: 24,
+          boxSizing: "border-box",
+          overflowY: "auto",
+        }}
+      >
+        {/* Logo and SearchBar */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            marginBottom: 16,
+          }}
+        >
+          <img
+            src="/logo.png"
+            alt="Logo"
+            style={{
+              width: 40,
+              height: 40,
+              objectFit: "contain",
+              marginRight: 8,
+            }}
+          />
+          <span style={{ fontSize: 20, fontWeight: "bold", color: "#1A73E8" }}>
+            Maps
+          </span>
+        </div>
+        <SearchBar
+          search={search}
+          setSearch={setSearch}
+          fetchSuggestions={fetchSuggestions}
+          setSearchFocused={setSearchFocused}
+          searchFocused={searchFocused}
+          nearestEvacCenters={nearestEvacCenters}
+          handleSelectSuggestion={handleSelectSuggestion}
+          suggestions={suggestions}
+          location={location}
+          setSuggestions={setSuggestions}
+          getCachedLocations={loadCachedLocations}
+        />
+        {/* Route and Navigation UI */}
         {!searchFocused && waypointData?.routes && (
-          <View style={styles.routesContainer}>
-            <Text style={styles.routeTitle}>{search}</Text>
-            <Text style={styles.routeTitle}>Suggested Routes</Text>
-
+          <div
+            style={{
+              maxHeight: 350,
+              padding: 16,
+              background: "#fff",
+              borderTopLeftRadius: 16,
+              borderTopRightRadius: 16,
+              boxShadow: "0 -2px 8px rgba(0,0,0,0.08)",
+              margin: "16px 0",
+              borderRadius: 8,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 16,
+                fontWeight: 700,
+                marginTop: 12,
+                marginBottom: 4,
+                color: "#222",
+              }}
+            >
+              {search}
+            </div>
+            <div
+              style={{
+                fontSize: 16,
+                fontWeight: 700,
+                marginBottom: 4,
+                color: "#222",
+              }}
+            >
+              Suggested Routes
+            </div>
             {!navigating ? (
               <>
-                <TouchableOpacity
-                  style={styles.goNowButton}
-                  onPress={handleGoNow}
+                <button
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    background: "#00C8F8",
+                    borderRadius: 8,
+                    padding: 10,
+                    fontSize: 20,
+                    fontWeight: "bold",
+                    color: "#fff",
+                    marginBottom: 8,
+                    border: "none",
+                  }}
+                  onClick={handleGoNow}
                 >
-                  <Text style={styles.goNowText}>GO NOW</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.cancelButton}
-                  onPress={handleCancelWaypoint}
+                  GO NOW
+                </button>
+                <button
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    border: "2px solid #00C8F8",
+                    borderRadius: 8,
+                    padding: 10,
+                    fontSize: 20,
+                    fontWeight: "bold",
+                    color: "#00C8F8",
+                    marginBottom: 8,
+                    background: "#fff",
+                  }}
+                  onClick={handleCancelWaypoint}
                 >
-                  <Text style={styles.cancelText}>CANCEL</Text>
-                </TouchableOpacity>
-                <FlatList
-                  data={waypointData.routes}
-                  keyExtractor={(_, idx) => idx.toString()}
-                  renderItem={({ item, index }) => (
-                    <TouchableOpacity
-                      onPress={() => setSelectedRoute(index)}
-                      style={[
-                        styles.routeItem,
-                        {
-                          backgroundColor:
-                            index === waypointData.best_route_index
-                              ? "#e0f7fa"
-                              : "#f9f9f9",
-                          borderColor:
-                            selectedRoute === index ? "#00C8F8" : "#e0e0e0",
-                        },
-                      ]}
+                  CANCEL
+                </button>
+                <div>
+                  {waypointData.routes.map((item, index) => (
+                    <div
+                      key={index}
+                      onClick={() => setSelectedRoute(index)}
+                      style={{
+                        marginBottom: 12,
+                        padding: 12,
+                        borderRadius: 8,
+                        border: `1px solid ${
+                          selectedRoute === index ? "#00C8F8" : "#e0e0e0"
+                        }`,
+                        background:
+                          index === waypointData.best_route_index
+                            ? "#e0f7fa"
+                            : "#f9f9f9",
+                        cursor: "pointer",
+                      }}
                     >
-                      <Text
-                        style={[
-                          styles.routeText,
-                          {
-                            color:
-                              index === waypointData.best_route_index
-                                ? "#00C8F8"
-                                : "#333",
-                          },
-                        ]}
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 500,
+                          marginBottom: 4,
+                          color:
+                            index === waypointData.best_route_index
+                              ? "#00C8F8"
+                              : "#333",
+                        }}
                       >
                         Route {index + 1}
                         {index === waypointData.best_route_index &&
                           " (Best Route)"}
-                      </Text>
-                      <Text style={styles.routeSubText}>
+                      </div>
+                      <div
+                        style={{ fontSize: 12, color: "#555", marginBottom: 2 }}
+                      >
                         Distance: {item.distance.toFixed(2)} km
-                      </Text>
-                      <Text style={styles.routeSubText}>
+                      </div>
+                      <div
+                        style={{ fontSize: 12, color: "#555", marginBottom: 2 }}
+                      >
                         Estimated Time: {Math.ceil(item.duration)} mins
-                      </Text>
-                      <Text style={styles.routeSubText}>
+                      </div>
+                      <div
+                        style={{ fontSize: 12, color: "#555", marginBottom: 2 }}
+                      >
                         Flood Levels:{" "}
                         {item.flood_levels?.includes(5)
                           ? "Severe"
@@ -478,10 +485,10 @@ export default function Map() {
                           : item.flood_levels?.includes(2)
                           ? "Mild"
                           : "None"}
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                />
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </>
             ) : (
               <NavigationSteps
@@ -491,22 +498,44 @@ export default function Map() {
                 setNavigating={setNavigating}
               />
             )}
-          </View>
+          </div>
         )}
 
         {isLoading && (
-          <View style={styles.loadingContainer}>
-            <Text style={styles.loadingText}>Loading routes...</Text>
-          </View>
+          <div
+            style={{
+              padding: 20,
+              textAlign: "center",
+              background: "#fff",
+              color: "#1A73E8",
+              fontWeight: 900,
+              fontSize: 16,
+              margin: "16px 0",
+              borderRadius: 8,
+            }}
+          >
+            Loading routes...
+          </div>
         )}
 
         {location && (
-          <TouchableOpacity
-            style={styles.addLocationButton}
-            onPress={() => setIsAddLocationVisible(true)}
+          <button
+            style={{
+              position: "fixed",
+              right: 16,
+              bottom: 16,
+              background: "#00C8F8",
+              padding: 12,
+              borderRadius: 25,
+              color: "white",
+              fontWeight: "bold",
+              border: "none",
+              zIndex: 10,
+            }}
+            onClick={() => setIsAddLocationVisible(true)}
           >
-            <Text style={styles.addLocationButtonText}>+ Add Location</Text>
-          </TouchableOpacity>
+            + Add Location
+          </button>
         )}
 
         {location && (
@@ -517,126 +546,7 @@ export default function Map() {
             initialLocation={location}
           />
         )}
-      </View>
-
-      <StatusBar style="auto" />
-    </View>
+      </div>
+    </div>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#F7F7F7" },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingTop: 40,
-    paddingBottom: 10,
-    paddingHorizontal: 16,
-    backgroundColor: "#fff",
-    gap: 10,
-  },
-  logo: { width: 40, height: 40, resizeMode: "contain" },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: "bold",
-    color: "#1A73E8",
-    marginLeft: 12,
-  },
-  map: { flex: 5, width: "100%" },
-  fullScreenSearch: {
-    position: "absolute",
-    height: "100%",
-    top: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: "#fff",
-    zIndex: 100,
-    paddingTop: 60,
-    paddingHorizontal: 16,
-  },
-  routesContainer: {
-    maxHeight: 350,
-    padding: 16,
-    backgroundColor: "#fff",
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: {
-      width: 0,
-      height: -2,
-    },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-  },
-  routeTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    marginTop: 12,
-    marginBottom: 4,
-    color: "#222",
-  },
-  goNowButton: {
-    alignItems: "center",
-    marginBottom: 8,
-    width: "100%",
-    backgroundColor: "#00C8F8",
-    borderRadius: 8,
-    padding: 10,
-  },
-  goNowText: {
-    fontSize: 20,
-    fontWeight: "bold",
-    textAlign: "center",
-    color: "#fff",
-  },
-  cancelButton: {
-    alignItems: "center",
-    marginBottom: 8,
-    width: "100%",
-    border: "solid 2px #00C8F8",
-    borderRadius: 8,
-    padding: 10,
-  },
-  cancelText: {
-    fontSize: 20,
-    fontWeight: "bold",
-    textAlign: "center",
-    color: "#00C8F8",
-  },
-  routeItem: {
-    marginBottom: 12,
-    padding: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-  },
-  routeText: { fontSize: 14, fontWeight: "500", marginBottom: 4 },
-  routeSubText: { fontSize: 12, color: "#555", marginBottom: 2 },
-  loadingContainer: {
-    padding: 20,
-    alignItems: "center",
-    backgroundColor: "#fff",
-  },
-  loadingText: { color: "#1A73E8", fontWeight: "900", fontSize: 16 },
-  addLocationButton: {
-    position: "absolute",
-    right: 16,
-    bottom: 16,
-    backgroundColor: "#00C8F8",
-    padding: 12,
-    borderRadius: 25,
-    elevation: 5,
-    shadowColor: "#000",
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-    zIndex: 1,
-  },
-  addLocationButtonText: {
-    color: "white",
-    fontWeight: "bold",
-  },
-});
